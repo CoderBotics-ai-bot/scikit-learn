@@ -130,78 +130,45 @@ def isdtype(dtype, kind, *, xp):
     else:
         return _isdtype_single(dtype, kind, xp=xp)
 
-def _isdtype_single(dtype, kind, *, xp) -> bool:
-    """
-    Check if the dtype is of specified kind.
 
-    This function checks if the provided dtype belongs to the specified kind.
-    The kind can be either a string or a data type. In latter case, the function
-    directly checks if dtype and kind are the same.
-
-    Parameters:
-    dtype : dtype to check.
-    kind : str or dtype. The kind of data type. For str, it can be "bool",
-           "signed integer", "unsigned integer", "integral", "real floating",
-           "complex floating", and "numeric".
-    xp : The array module to use, such as numpy or cupy.
-
-    Returns:
-    bool : True if dtype is of the specified kind, otherwise False.
-
-    Raises:
-    ValueError : If kind is a string and not recognized.
-    """
-    if not isinstance(kind, str):
+def _isdtype_single(dtype, kind, *, xp):
+    if isinstance(kind, str):
+        if kind == "bool":
+            return dtype == xp.bool
+        elif kind == "signed integer":
+            return dtype in {xp.int8, xp.int16, xp.int32, xp.int64}
+        elif kind == "unsigned integer":
+            return dtype in {xp.uint8, xp.uint16, xp.uint32, xp.uint64}
+        elif kind == "integral":
+            return any(
+                _isdtype_single(dtype, k, xp=xp)
+                for k in ("signed integer", "unsigned integer")
+            )
+        elif kind == "real floating":
+            return dtype in {xp.float32, xp.float64}
+        elif kind == "complex floating":
+            # Some name spaces do not have complex, such as cupy.array_api
+            # and numpy.array_api
+            complex_dtypes = set()
+            if hasattr(xp, "complex64"):
+                complex_dtypes.add(xp.complex64)
+            if hasattr(xp, "complex128"):
+                complex_dtypes.add(xp.complex128)
+            return dtype in complex_dtypes
+        elif kind == "numeric":
+            return any(
+                _isdtype_single(dtype, k, xp=xp)
+                for k in ("integral", "real floating", "complex floating")
+            )
+        else:
+            raise ValueError(f"Unrecognized data type kind: {kind!r}")
+    else:
         return dtype == kind
 
-    kind_str_to_dtype_mapping = {
-        "bool": [xp.bool],
-        "signed integer": [xp.int8, xp.int16, xp.int32, xp.int64],
-        "unsigned integer": [xp.uint8, xp.uint16, xp.uint32, xp.uint64],
-        "real floating": [xp.float32, xp.float64],
-        "complex floating": _get_complex_dtypes(xp),
-    }
 
-    integral_kinds = ["signed integer", "unsigned integer"]
-    numeric_kinds = integral_kinds + ["real floating", "complex floating"]
-
-    kind_str_to_dtype_mapping["integral"] = [
-        dtype for kind in integral_kinds for dtype in kind_str_to_dtype_mapping[kind]
-    ]
-
-    kind_str_to_dtype_mapping["numeric"] = [
-        dtype for kind in numeric_kinds for dtype in kind_str_to_dtype_mapping[kind]
-    ]
-
-    if kind in kind_str_to_dtype_mapping:
-        return dtype in kind_str_to_dtype_mapping[kind]
-
-    raise ValueError(f"Unrecognized data type kind: {kind!r}")
-
-
-def _get_complex_dtypes(xp):
-    complex_dtypes = []
-    if hasattr(xp, "complex64"):
-        complex_dtypes.append(xp.complex64)
-    if hasattr(xp, "complex128"):
-        complex_dtypes.append(xp.complex128)
-
-    return complex_dtypes
 
 
 class _ArrayAPIWrapper:
-    """sklearn specific Array API compatibility wrapper
-
-    This wrapper makes it possible for scikit-learn maintainers to
-    deal with discrepancies between different implementations of the
-    Python array API standard and its evolution over time.
-
-    The Python array API standard specification:
-    https://data-apis.org/array-api/latest/
-
-    Documentation of the NumPy implementation:
-    https://numpy.org/neps/nep-0047-array-api-standard.html
-    """
 
     def __init__(self, array_namespace):
         self._namespace = array_namespace
@@ -213,31 +180,65 @@ class _ArrayAPIWrapper:
         return self._namespace == other._namespace
 
     def take(self, X, indices, *, axis=0):
+        """
+        Takes elements from an array along an optional axis.
+
+        This method behaves like numpy.take, but includes checks to ensure valid
+        input for the axis and ndim parameters. If the namespace is numpy.array_api,
+        numpy.take will be used directly.
+
+        Args:
+            X (ndarray): array from which to take elements.
+            indices (ndarray): indices of the values to extract.
+            axis (int, optional): the axis along which to select values. Default is 0.
+
+        Returns:
+            ndarray: The result of taking the elements of X at the specified indices.
+
+        Raises:
+            ValueError: When the axis passed is not 0 or 1.
+            ValueError: When the number of dimensions of the input array is not 1 or 2.
+        """
+        self.check_namespace_validity()
+
+        self.validate_axis(axis)
+        self.validate_ndim(X)
+
+        if axis == 0:
+            return self.execute_take_axis_0(X, indices)
+        else:  # axis == 1
+            return self.execute_take_axis_1(X, indices)
+
+    def isdtype(self, dtype, kind):
+        return isdtype(dtype, kind, xp=self._namespace)
+
+    def check_namespace_validity(self):
         # When array_api supports `take` we can use this directly
         # https://github.com/data-apis/array-api/issues/177
         if self._namespace.__name__ == "numpy.array_api":
             X_np = numpy.take(X, indices, axis=axis)
             return self._namespace.asarray(X_np)
 
-        # We only support axis in (0, 1) and ndim in (1, 2) because that is all we need
-        # in scikit-learn
+    @staticmethod
+    def validate_axis(axis):
         if axis not in {0, 1}:
             raise ValueError(f"Only axis in (0, 1) is supported. Got {axis}")
 
+    @staticmethod
+    def validate_ndim(X):
         if X.ndim not in {1, 2}:
             raise ValueError(f"Only X.ndim in (1, 2) is supported. Got {X.ndim}")
 
-        if axis == 0:
-            if X.ndim == 1:
-                selected = [X[i] for i in indices]
-            else:  # X.ndim == 2
-                selected = [X[i, :] for i in indices]
-        else:  # axis == 1
-            selected = [X[:, i] for i in indices]
-        return self._namespace.stack(selected, axis=axis)
+    def execute_take_axis_0(self, X, indices):
+        if X.ndim == 1:
+            selected_elements = [X[i] for i in indices]
+        else:  # X.ndim == 2
+            selected_elements = [X[i, :] for i in indices]
+        return self._namespace.stack(selected_elements, axis=0)
 
-    def isdtype(self, dtype, kind):
-        return isdtype(dtype, kind, xp=self._namespace)
+    def execute_take_axis_1(self, X, indices):
+        selected_elements = [X[:, i] for i in indices]
+        return self._namespace.stack(selected_elements, axis=1)
 
 
 def _check_device_cpu(device):  # noqa
@@ -431,112 +432,59 @@ def _expit(X):
 
 
 def _add_to_diagonal(array, value, xp):
-    """
-    Add a given value to the diagonal elements of the input array.
-    This method is a workaround for the lack of support for xp.reshape(a, shape, copy=False) in
-    numpy.array_api: https://github.com/numpy/numpy/issues/23410
-
-    Args:
-        array : An object that could be converted into an array.
-        value : The value to be added to the diagonal elements of the array.
-                This could be a scalar or list of values corresponding to each diagonal element.
-        xp : Array module such as numpy or cupy.
-
-    Returns:
-        The input array where value is added to the diagonal elements.
-
-    Raises:
-        TypeError : If array is not convertible to array or if value cannot be broadcasted to the diagonal elements.
-    """
+    # Workaround for the lack of support for xp.reshape(a, shape, copy=False) in
+    # numpy.array_api: https://github.com/numpy/numpy/issues/23410
     value = xp.asarray(value, dtype=array.dtype)
-
     if _is_numpy_namespace(xp):
-        return _handle_mpi(xp, array, value)
+        array_np = numpy.asarray(array)
+        array_np.flat[:: array.shape[0] + 1] += value
+        return xp.asarray(array_np)
     elif value.ndim == 1:
-        return _handle_1D(xp, array, value)
+        for i in range(array.shape[0]):
+            array[i, i] += value[i]
     else:
-        return _handle_scalar(xp, array, value)
+        # scalar value
+        for i in range(array.shape[0]):
+            array[i, i] += value
 
 
 def _weighted_sum(sample_score, sample_weight, normalize=False, xp=None):
-    """
-    Compute the weighted sum or average (normalized sum) of the input
-    sample scores with their corresponding sample weights.
+    # XXX: this function accepts Array API input but returns a Python scalar
+    # float. The call to float() is convenient because it removes the need to
+    # move back results from device to host memory (e.g. calling `.cpu()` on a
+    # torch tensor). However, this might interact in unexpected ways (break?)
+    # with lazy Array API implementations. See:
+    # https://github.com/data-apis/array-api/issues/642
+    if xp is None:
+        xp, _ = get_namespace(sample_score)
+    if normalize and _is_numpy_namespace(xp):
+        sample_score_np = numpy.asarray(sample_score)
+        if sample_weight is not None:
+            sample_weight_np = numpy.asarray(sample_weight)
+        else:
+            sample_weight_np = None
+        return float(numpy.average(sample_score_np, weights=sample_weight_np))
 
-    Parameters
-    ----------
-    sample_score : array-like
-        The array of sample scores.
-    sample_weight : array-like
-        The array of weights for the corresponding sample scores. If not
-        provided, all samples are considered to have equal weights.
-    normalize : bool, default=False
-        If set to True, the function will return the normalized sum (average)
-        instead of the sum of the sample scores.
-    xp : module, optional
-        Array API namespace in which to compute the weighted sum. If not provided,
-        the appropriate namespace will be inferred from `sample_score`.
+    if not xp.isdtype(sample_score.dtype, "real floating"):
+        sample_score = xp.astype(sample_score, xp.float64)
 
-    Returns
-    -------
-    result : float
-        The computed weighted sum or average (if `normalize` is set to True)
-        of the provided sample scores.
-
-    Notes
-    -----
-    This function accepts Array API input but returns a Python scalar float.
-    The call to float() is convenient because it removes the need to move back
-    results from device to host memory (e.g. calling `.cpu()` on a torch tensor).
-    However, this might interact in unexpected ways (break?) with lazy Array API
-    implementations.
-
-    Raises
-    ------
-    ValueError
-        If `sample_score` and `sample_weight` arrays do not have the same size.
-
-    """
-    validate_inputs(sample_score, sample_weight)
-    xp = xp or get_namespace(sample_score)
-    weighted_sum = calculate_sum(sample_score, sample_weight, xp)
+    if sample_weight is not None:
+        sample_weight = xp.asarray(sample_weight)
+        if not xp.isdtype(sample_weight.dtype, "real floating"):
+            sample_weight = xp.astype(sample_weight, xp.float64)
 
     if normalize:
-        result = normalize_sum(weighted_sum, sample_weight, xp)
+        if sample_weight is not None:
+            scale = xp.sum(sample_weight)
+        else:
+            scale = sample_score.shape[0]
+        if scale != 0:
+            sample_score = sample_score / scale
+
+    if sample_weight is not None:
+        return float(sample_score @ sample_weight)
     else:
-        result = weighted_sum
-
-    return result
-
-def _handle_mpi(xp, array, value):
-    array_np = numpy.asarray(array)
-    array_np.flat[:: array.shape[0] + 1] += value
-    return xp.asarray(array_np)
-
-def validate_inputs(sample_score, sample_weight):
-    if len(sample_score) != len(sample_weight):
-        raise ValueError("`sample_score` and `sample_weight` must have the same size.")
-
-
-def calculate_sum(sample_score, sample_weight, xp):
-    return float((xp.asarray(sample_score) * xp.asarray(sample_weight)).sum())
-
-
-def normalize_sum(weighted_sum, sample_weight, xp):
-    norm_factor = xp.asarray(sample_weight).sum()
-    return float(weighted_sum / norm_factor)
-
-
-def _handle_1D(xp, array, value):
-    for i in range(array.shape[0]):
-        array[i, i] += value[i]
-    return array
-
-
-def _handle_scalar(xp, array, value):
-    for i in range(array.shape[0]):
-        array[i, i] += value
-    return array
+        return float(xp.sum(sample_score))
 
 
 def _asarray_with_order(array, dtype=None, order=None, copy=None, *, xp=None):
