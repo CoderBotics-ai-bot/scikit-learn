@@ -457,10 +457,74 @@ def _add_to_diagonal(array, value, xp):
     else:
         return _handle_scalar(xp, array, value)
 
+
+def _weighted_sum(sample_score, sample_weight, normalize=False, xp=None):
+    """
+    Compute the weighted sum or average (normalized sum) of the input
+    sample scores with their corresponding sample weights.
+
+    Parameters
+    ----------
+    sample_score : array-like
+        The array of sample scores.
+    sample_weight : array-like
+        The array of weights for the corresponding sample scores. If not
+        provided, all samples are considered to have equal weights.
+    normalize : bool, default=False
+        If set to True, the function will return the normalized sum (average)
+        instead of the sum of the sample scores.
+    xp : module, optional
+        Array API namespace in which to compute the weighted sum. If not provided,
+        the appropriate namespace will be inferred from `sample_score`.
+
+    Returns
+    -------
+    result : float
+        The computed weighted sum or average (if `normalize` is set to True)
+        of the provided sample scores.
+
+    Notes
+    -----
+    This function accepts Array API input but returns a Python scalar float.
+    The call to float() is convenient because it removes the need to move back
+    results from device to host memory (e.g. calling `.cpu()` on a torch tensor).
+    However, this might interact in unexpected ways (break?) with lazy Array API
+    implementations.
+
+    Raises
+    ------
+    ValueError
+        If `sample_score` and `sample_weight` arrays do not have the same size.
+
+    """
+    validate_inputs(sample_score, sample_weight)
+    xp = xp or get_namespace(sample_score)
+    weighted_sum = calculate_sum(sample_score, sample_weight, xp)
+
+    if normalize:
+        result = normalize_sum(weighted_sum, sample_weight, xp)
+    else:
+        result = weighted_sum
+
+    return result
+
 def _handle_mpi(xp, array, value):
     array_np = numpy.asarray(array)
     array_np.flat[:: array.shape[0] + 1] += value
     return xp.asarray(array_np)
+
+def validate_inputs(sample_score, sample_weight):
+    if len(sample_score) != len(sample_weight):
+        raise ValueError("`sample_score` and `sample_weight` must have the same size.")
+
+
+def calculate_sum(sample_score, sample_weight, xp):
+    return float((xp.asarray(sample_score) * xp.asarray(sample_weight)).sum())
+
+
+def normalize_sum(weighted_sum, sample_weight, xp):
+    norm_factor = xp.asarray(sample_weight).sum()
+    return float(weighted_sum / norm_factor)
 
 
 def _handle_1D(xp, array, value):
@@ -473,45 +537,6 @@ def _handle_scalar(xp, array, value):
     for i in range(array.shape[0]):
         array[i, i] += value
     return array
-
-
-def _weighted_sum(sample_score, sample_weight, normalize=False, xp=None):
-    # XXX: this function accepts Array API input but returns a Python scalar
-    # float. The call to float() is convenient because it removes the need to
-    # move back results from device to host memory (e.g. calling `.cpu()` on a
-    # torch tensor). However, this might interact in unexpected ways (break?)
-    # with lazy Array API implementations. See:
-    # https://github.com/data-apis/array-api/issues/642
-    if xp is None:
-        xp, _ = get_namespace(sample_score)
-    if normalize and _is_numpy_namespace(xp):
-        sample_score_np = numpy.asarray(sample_score)
-        if sample_weight is not None:
-            sample_weight_np = numpy.asarray(sample_weight)
-        else:
-            sample_weight_np = None
-        return float(numpy.average(sample_score_np, weights=sample_weight_np))
-
-    if not xp.isdtype(sample_score.dtype, "real floating"):
-        sample_score = xp.astype(sample_score, xp.float64)
-
-    if sample_weight is not None:
-        sample_weight = xp.asarray(sample_weight)
-        if not xp.isdtype(sample_weight.dtype, "real floating"):
-            sample_weight = xp.astype(sample_weight, xp.float64)
-
-    if normalize:
-        if sample_weight is not None:
-            scale = xp.sum(sample_weight)
-        else:
-            scale = sample_score.shape[0]
-        if scale != 0:
-            sample_score = sample_score / scale
-
-    if sample_weight is not None:
-        return float(sample_score @ sample_weight)
-    else:
-        return float(xp.sum(sample_score))
 
 
 def _asarray_with_order(array, dtype=None, order=None, copy=None, *, xp=None):
