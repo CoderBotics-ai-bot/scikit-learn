@@ -166,19 +166,9 @@ def _isdtype_single(dtype, kind, *, xp):
         return dtype == kind
 
 
+
+
 class _ArrayAPIWrapper:
-    """sklearn specific Array API compatibility wrapper
-
-    This wrapper makes it possible for scikit-learn maintainers to
-    deal with discrepancies between different implementations of the
-    Python array API standard and its evolution over time.
-
-    The Python array API standard specification:
-    https://data-apis.org/array-api/latest/
-
-    Documentation of the NumPy implementation:
-    https://numpy.org/neps/nep-0047-array-api-standard.html
-    """
 
     def __init__(self, array_namespace):
         self._namespace = array_namespace
@@ -190,31 +180,65 @@ class _ArrayAPIWrapper:
         return self._namespace == other._namespace
 
     def take(self, X, indices, *, axis=0):
+        """
+        Takes elements from an array along an optional axis.
+
+        This method behaves like numpy.take, but includes checks to ensure valid
+        input for the axis and ndim parameters. If the namespace is numpy.array_api,
+        numpy.take will be used directly.
+
+        Args:
+            X (ndarray): array from which to take elements.
+            indices (ndarray): indices of the values to extract.
+            axis (int, optional): the axis along which to select values. Default is 0.
+
+        Returns:
+            ndarray: The result of taking the elements of X at the specified indices.
+
+        Raises:
+            ValueError: When the axis passed is not 0 or 1.
+            ValueError: When the number of dimensions of the input array is not 1 or 2.
+        """
+        self.check_namespace_validity()
+
+        self.validate_axis(axis)
+        self.validate_ndim(X)
+
+        if axis == 0:
+            return self.execute_take_axis_0(X, indices)
+        else:  # axis == 1
+            return self.execute_take_axis_1(X, indices)
+
+    def isdtype(self, dtype, kind):
+        return isdtype(dtype, kind, xp=self._namespace)
+
+    def check_namespace_validity(self):
         # When array_api supports `take` we can use this directly
         # https://github.com/data-apis/array-api/issues/177
         if self._namespace.__name__ == "numpy.array_api":
             X_np = numpy.take(X, indices, axis=axis)
             return self._namespace.asarray(X_np)
 
-        # We only support axis in (0, 1) and ndim in (1, 2) because that is all we need
-        # in scikit-learn
+    @staticmethod
+    def validate_axis(axis):
         if axis not in {0, 1}:
             raise ValueError(f"Only axis in (0, 1) is supported. Got {axis}")
 
+    @staticmethod
+    def validate_ndim(X):
         if X.ndim not in {1, 2}:
             raise ValueError(f"Only X.ndim in (1, 2) is supported. Got {X.ndim}")
 
-        if axis == 0:
-            if X.ndim == 1:
-                selected = [X[i] for i in indices]
-            else:  # X.ndim == 2
-                selected = [X[i, :] for i in indices]
-        else:  # axis == 1
-            selected = [X[:, i] for i in indices]
-        return self._namespace.stack(selected, axis=axis)
+    def execute_take_axis_0(self, X, indices):
+        if X.ndim == 1:
+            selected_elements = [X[i] for i in indices]
+        else:  # X.ndim == 2
+            selected_elements = [X[i, :] for i in indices]
+        return self._namespace.stack(selected_elements, axis=0)
 
-    def isdtype(self, dtype, kind):
-        return isdtype(dtype, kind, xp=self._namespace)
+    def execute_take_axis_1(self, X, indices):
+        selected_elements = [X[:, i] for i in indices]
+        return self._namespace.stack(selected_elements, axis=1)
 
 
 def _check_device_cpu(device):  # noqa
