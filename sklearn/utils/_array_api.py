@@ -130,40 +130,63 @@ def isdtype(dtype, kind, *, xp):
     else:
         return _isdtype_single(dtype, kind, xp=xp)
 
+def _isdtype_single(dtype, kind, *, xp) -> bool:
+    """
+    Check if the dtype is of specified kind.
 
-def _isdtype_single(dtype, kind, *, xp):
-    if isinstance(kind, str):
-        if kind == "bool":
-            return dtype == xp.bool
-        elif kind == "signed integer":
-            return dtype in {xp.int8, xp.int16, xp.int32, xp.int64}
-        elif kind == "unsigned integer":
-            return dtype in {xp.uint8, xp.uint16, xp.uint32, xp.uint64}
-        elif kind == "integral":
-            return any(
-                _isdtype_single(dtype, k, xp=xp)
-                for k in ("signed integer", "unsigned integer")
-            )
-        elif kind == "real floating":
-            return dtype in {xp.float32, xp.float64}
-        elif kind == "complex floating":
-            # Some name spaces do not have complex, such as cupy.array_api
-            # and numpy.array_api
-            complex_dtypes = set()
-            if hasattr(xp, "complex64"):
-                complex_dtypes.add(xp.complex64)
-            if hasattr(xp, "complex128"):
-                complex_dtypes.add(xp.complex128)
-            return dtype in complex_dtypes
-        elif kind == "numeric":
-            return any(
-                _isdtype_single(dtype, k, xp=xp)
-                for k in ("integral", "real floating", "complex floating")
-            )
-        else:
-            raise ValueError(f"Unrecognized data type kind: {kind!r}")
-    else:
+    This function checks if the provided dtype belongs to the specified kind.
+    The kind can be either a string or a data type. In latter case, the function
+    directly checks if dtype and kind are the same.
+
+    Parameters:
+    dtype : dtype to check.
+    kind : str or dtype. The kind of data type. For str, it can be "bool",
+           "signed integer", "unsigned integer", "integral", "real floating",
+           "complex floating", and "numeric".
+    xp : The array module to use, such as numpy or cupy.
+
+    Returns:
+    bool : True if dtype is of the specified kind, otherwise False.
+
+    Raises:
+    ValueError : If kind is a string and not recognized.
+    """
+    if not isinstance(kind, str):
         return dtype == kind
+
+    kind_str_to_dtype_mapping = {
+        "bool": [xp.bool],
+        "signed integer": [xp.int8, xp.int16, xp.int32, xp.int64],
+        "unsigned integer": [xp.uint8, xp.uint16, xp.uint32, xp.uint64],
+        "real floating": [xp.float32, xp.float64],
+        "complex floating": _get_complex_dtypes(xp),
+    }
+
+    integral_kinds = ["signed integer", "unsigned integer"]
+    numeric_kinds = integral_kinds + ["real floating", "complex floating"]
+
+    kind_str_to_dtype_mapping["integral"] = [
+        dtype for kind in integral_kinds for dtype in kind_str_to_dtype_mapping[kind]
+    ]
+
+    kind_str_to_dtype_mapping["numeric"] = [
+        dtype for kind in numeric_kinds for dtype in kind_str_to_dtype_mapping[kind]
+    ]
+
+    if kind in kind_str_to_dtype_mapping:
+        return dtype in kind_str_to_dtype_mapping[kind]
+
+    raise ValueError(f"Unrecognized data type kind: {kind!r}")
+
+
+def _get_complex_dtypes(xp):
+    complex_dtypes = []
+    if hasattr(xp, "complex64"):
+        complex_dtypes.append(xp.complex64)
+    if hasattr(xp, "complex128"):
+        complex_dtypes.append(xp.complex128)
+
+    return complex_dtypes
 
 
 class _ArrayAPIWrapper:
