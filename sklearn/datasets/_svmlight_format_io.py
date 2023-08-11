@@ -9,13 +9,6 @@ predict.
 This format is used as the default format for both svmlight and the
 libsvm command line programs.
 """
-
-# Authors: Mathieu Blondel <mathieu@mblondel.org>
-#          Lars Buitinck
-#          Olivier Grisel <olivier.grisel@ensta.org>
-# License: BSD 3 clause
-
-import os.path
 from contextlib import closing
 from numbers import Integral
 
@@ -25,6 +18,21 @@ import scipy.sparse as sp
 from .. import __version__
 from ..utils import IS_PYPY, check_array
 from ..utils._param_validation import HasMethods, Interval, StrOptions, validate_params
+
+
+import os
+from typing import Any, Union
+
+
+import gzip
+import bz2
+
+# Authors: Mathieu Blondel <mathieu@mblondel.org>
+#          Lars Buitinck
+#          Olivier Grisel <olivier.grisel@ensta.org>
+# License: BSD 3 clause
+
+import os.path
 
 if not IS_PYPY:
     from ._svmlight_format_fast import (
@@ -199,26 +207,44 @@ def load_svmlight_file(
         )
     )
 
+def _gen_open(f: Union[int, os.PathLike, str]) -> Any:
+    """
+    Open various types of files (including compressed files) for reading.
 
-def _gen_open(f):
-    if isinstance(f, int):  # file descriptor
-        return open(f, "rb", closefd=False)
+    This function is primarily used for reading files in the SVMLight format. The types of files it
+    can handle include file descriptors (specified by an integer), PathLike objects and uncompressed or
+    gzip/bz2 compressed files (both specified by a string).
+
+    Parameters
+    ----------
+    f : Union[int, os.PathLike, str]
+        File to open. Could either be a file descriptor, a PathLike object, or a directly specified uncompressed
+        or gzip/bz2 compressed file.
+
+    Returns
+    -------
+    Any
+        A file object corresponding to the opened file.
+
+    Raises
+    ------
+    TypeError
+        If the input is not an integer, a PathLike object, or a string pointing to a file.
+
+    """
+
+    if isinstance(f, str):
+        f = os.path.expanduser(f)
+        return _open_compressed_file(f)
+
+    elif isinstance(f, Integral):
+        return os.fdopen(f, "rb")
+
     elif isinstance(f, os.PathLike):
-        f = os.fspath(f)
-    elif not isinstance(f, str):
-        raise TypeError("expected {str, int, path-like, file-like}, got %s" % type(f))
-
-    _, ext = os.path.splitext(f)
-    if ext == ".gz":
-        import gzip
-
-        return gzip.open(f, "rb")
-    elif ext == ".bz2":
-        from bz2 import BZ2File
-
-        return BZ2File(f, "rb")
-    else:
         return open(f, "rb")
+
+    else:
+        raise TypeError("Input should be a string, integer or os.PathLike object.")
 
 
 def _open_and_load(f, dtype, multilabel, zero_based, query_id, offset=0, length=-1):
@@ -242,6 +268,30 @@ def _open_and_load(f, dtype, multilabel, zero_based, query_id, offset=0, length=
 
     data = np.asarray(data, dtype=dtype)  # no-op for float{32,64}
     return data, indices, indptr, labels, query
+
+
+def _open_compressed_file(filename: str) -> Any:
+    """
+    Opens a compressed file for reading.
+
+    Parameters
+    ----------
+    filename : str
+        Name of the file to open.
+
+    Returns
+    -------
+    Any
+        File object corresponding to the opened file.
+
+    """
+
+    if filename.endswith(".gz"):
+        return gzip.open(filename, "rb")
+    elif filename.endswith(".bz2"):
+        return bz2.open(filename, "rb")
+    else:
+        return open(filename, "rb")
 
 
 @validate_params(
