@@ -431,20 +431,48 @@ def _expit(X):
 
 
 def _add_to_diagonal(array, value, xp):
-    # Workaround for the lack of support for xp.reshape(a, shape, copy=False) in
-    # numpy.array_api: https://github.com/numpy/numpy/issues/23410
+    """
+    Add a given value to the diagonal elements of the input array.
+    This method is a workaround for the lack of support for xp.reshape(a, shape, copy=False) in
+    numpy.array_api: https://github.com/numpy/numpy/issues/23410
+
+    Args:
+        array : An object that could be converted into an array.
+        value : The value to be added to the diagonal elements of the array.
+                This could be a scalar or list of values corresponding to each diagonal element.
+        xp : Array module such as numpy or cupy.
+
+    Returns:
+        The input array where value is added to the diagonal elements.
+
+    Raises:
+        TypeError : If array is not convertible to array or if value cannot be broadcasted to the diagonal elements.
+    """
     value = xp.asarray(value, dtype=array.dtype)
+
     if _is_numpy_namespace(xp):
-        array_np = numpy.asarray(array)
-        array_np.flat[:: array.shape[0] + 1] += value
-        return xp.asarray(array_np)
+        return _handle_mpi(xp, array, value)
     elif value.ndim == 1:
-        for i in range(array.shape[0]):
-            array[i, i] += value[i]
+        return _handle_1D(xp, array, value)
     else:
-        # scalar value
-        for i in range(array.shape[0]):
-            array[i, i] += value
+        return _handle_scalar(xp, array, value)
+
+def _handle_mpi(xp, array, value):
+    array_np = numpy.asarray(array)
+    array_np.flat[:: array.shape[0] + 1] += value
+    return xp.asarray(array_np)
+
+
+def _handle_1D(xp, array, value):
+    for i in range(array.shape[0]):
+        array[i, i] += value[i]
+    return array
+
+
+def _handle_scalar(xp, array, value):
+    for i in range(array.shape[0]):
+        array[i, i] += value
+    return array
 
 
 def _weighted_sum(sample_score, sample_weight, normalize=False, xp=None):
